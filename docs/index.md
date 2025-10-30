@@ -154,3 +154,33 @@
 4.  **Этап 4: Расширение скрапера.** Добавление пагинации и сбора детальной информации по каждому объявлению, включая номер телефона.
 5.  **Этап 5: Финализация.** Реализация сохранения в CSV/JSON, полноценное логирование и обработка ошибок.
 6.  **Этап 6: Тестирование и отладка.** Комплексное тестирование на реальных данных.
+
+**8. Контейнеризация и запуск (Docker):**
+
+- Архитектура docker-compose:
+  - app: FastAPI + Uvicorn (порт 7474), скрапер и веб‑API в одном сервисе.
+  - bot: Telegram‑бот как отдельный сервис.
+  - chrome: selenium/standalone-chrome для работы undetected‑chromedriver (удаленный WebDriver).
+- Порты и сеть:
+  - Публикация 7474:7474 для веб‑приложения.
+  - chrome остается внутренним сервисом.
+- Volumes:
+  - ./data:/app/data — SQLite (app.db), экспорт и логи.
+- Переменные окружения (пример):
+  - WEB_ENABLE=true, WEB_HOST=0.0.0.0, WEB_PORT=7474
+  - SEARCHES_SQLITE_PATH=/app/data/app.db
+  - AVITO_LOGIN, AVITO_PASSWORD
+  - TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+- Команды сервисов:
+  - app: uvicorn main:app --host 0.0.0.0 --port 7474
+  - bot: python -m app.bot (или python bot.py)
+- Healthchecks:
+  - app: HTTP GET /healthz (200 — OK)
+  - chrome: встроенные механизмы Selenium образа
+- Запуск:
+  - docker compose up -d --build
+  - Просмотр логов: docker compose logs -f app | bot
+- Политики перезапуска:
+  - restart: unless-stopped для app и bot
+- Безопасность:
+  - Секреты через .env, ограничить публикацию портов, ограничить права на ./data.
