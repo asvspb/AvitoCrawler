@@ -22,12 +22,13 @@
 *   Приложение считывает параметры из внешнего файла (`config.ini`/`config.json`) и/или переменных окружения (переменные имеют приоритет).
 *   Параметры (расширенный список):
     *   auth: login, password, headless=true/false, user_data_dir, cookies_path, cookies_ttl_hours
-    *   input: urls_file
+    *   input: urls_file (если не используется веб-управление запросами)
+    *   searches: storage=sqlite|file, sqlite_path, default_filters, max_concurrency_per_search, schedule_cron/interval
     *   output: format=csv|json|jsonl, path, rotate_filesize_mb, compress=true/false, encoding
     *   http: user_agent, timeout_sec, max_retries, retry_backoff_base, retry_backoff_max
     *   rate_limits: rps_global, rps_per_host, random_delay_min/max, sleep_on_429_sec
     *   proxy: enabled=true/false, http_proxy, https_proxy, rotate_on_codes=[403,429]
-    *   scraper: max_pages, max_items_per_url, concurrency, feature_flags (например, fetch_phone=true/false)
+    *   scraper: max_pages, max_items_per_url, concurrency, feature_flags (например, fetch_phone=true/false), source=urls_file|db
     *   logging: level, logfile=app.log, json=true/false, rotate=true/false
 
 **4.2. Модуль аутентификации (`AuthManager`):**
@@ -45,8 +46,10 @@
 
 **4.3. Модуль сбора данных (`Scraper`):**
 *   Загружает `cookie` из файла, подготовленного `AuthManager`.
-*   Читает список URL-адресов поисковых запросов Avito из указанного в `config` файла (например, `urls.txt`).
-*   Для каждого URL в списке:
+*   Источники поисковых запросов:
+    *   из `urls_file` (файловый режим) или
+    *   из хранилища запросов (БД SQLite, таблица `searches`) при включенном веб-управлении.
+*   Для каждого активного запроса (search_id) или URL:
     1.  Выполняет запросы к мобильному API Avito (`m.avito.ru/api/9/items`) для получения списка объявлений.
     2.  Реализует обработку пагинации (переход по страницам результатов поиска), пока не будут собраны все объявления или не будет достигнут лимит (если он задан).
     3.  Для каждого объявления из списка извлекает базовую информацию (ID, заголовок, цена, город, ссылка).
@@ -54,6 +57,7 @@
         *   `/api/15/items/{item_id}` — для получения детальной информации (описание, параметры).
         *   `/api/1/items/{item_id}/phone` — для получения номера телефона (требует валидных `cookie`).
 *   Собранные данные по каждому объявлению должны агрегироваться в единую структуру.
+*   Привязка к запросам: для каждого найденного item_id сохраняется связь с `search_id` (многие-ко-многим), прогресс пагинации/чекпоинт ведется отдельно по каждому `search_id`.
 
 **4.4. Хранение данных:**
 *   Приложение должно сохранять собранные данные в файл.
@@ -73,8 +77,12 @@
     *   URL главного изображения
 
 **4.6. Веб-приложение для отображения статистики:**
-*   Цель: онлайн-визуализация собранной статистики по объявлениям и прогрессу скрапинга.
+*   Цель: онлайн-визуализа��ия собранной статистики по объявлениям и прогрессу скрапинга; управление поисковыми запросами.
 *   Архитектура: веб-сервер (FastAPI/Flask) + шаблоны (Jinja2) + статические ресурсы.
+*   Управление поисковыми запросами:
+    *   Форма добавления нового запроса: текст запроса (q), опциональные фильтры (категория, город/регион, цена, наличие телефона, дата публикации и т.п.).
+    *   Список запросов: активные/архивные, статус, время последнего запуска, кол-во объявлений, ошибки.
+    *   Операции: запуск/пауза/остановка скрапинга по запросу, редактирование, архивирование/удаление.
 *   Основной функционал:
     *   Дашборд: KPI (кол-во объявлений, новых/обновленных, доля с телефонами, ошибки, RPS, среднее время ответа, 429/403 счётчики).
     *   Графики: динамика по времени (по часам/дням), распределения по категориям/городам/цене.
@@ -82,15 +90,21 @@
     *   Статус скрапинга по URL: текущая страница, прогресс, ошибки, время последнего успеха.
     *   Экспорт фрагмента данных (CSV/JSONL) через UI.
 *   API (REST):
-    *   GET /api/stats/summary — агрегаты KPI.
-    *   GET /api/stats/timeseries?metric=items_per_minute&range=24h — временные ряды.
-    *   GET /api/items?query=...&city=...&page=... — список объявлений.
-    *   GET /api/scrape/status — статус процессов.
+    *   GET /api/stats/summary — агрегаты KPI (глобально и по search_id).
+    *   GET /api/stats/timeseries?metric=items_per_minute&range=24h&search_id=... — временные ряды.
+    *   GET /api/items?search_id=...&query=...&city=...&page=... — список объявлений по запросу.
+    *   GET /api/scrape/status?search_id=... — статус процессов по запросу.
+    *   POST /api/searches — создать запрос; GET /api/searches — список; PATCH /api/searches/{id} — изменить; POST /api/searches/{id}/run|pause|stop — управление.
 *   Безопасность: опциональная базовая авторизация/токен; rate limit на API.
-*   Источник данных: кэш/SQLite, обновление в реальном времени или периодической задачей.
+*   Источник данных: кэш/SQLite. Схема SQLite (минимум):
+    *   searches(id, query, filters_json, status, created_at, updated_at)
+    *   items(id PRIMARY KEY, url, title, price_amount, price_currency, city, address, published_at, main_image_url, seller_name, phone_e164, raw_json)
+    *   search_items(search_id, item_id, first_seen_at, last_seen_at, UNIQUE(search_id, item_id))
+    *   stats_timeseries(ts, metric, value, search_id)
+    *   scrape_status(search_id, last_page, last_run_at, last_error)
 
 **4.7. Телеграм-бот для доставки данных:**
-*   Цель: оперативная доставка новых объявлений и агрегатов в Telegram-канал/чат.
+*   Цель: оперативная доставка новых объявлений и агрегатов в Telegram-канал/чат; управление подписками на конкретные поисковые запросы.
 *   Архитектура: бот (`python-telegram-bot`/`aiogram`), отдельный процесс/служба.
 *   Функционал отправки:
     *   Авто-рассылка новых объявлений (настраиваемые фильтры: категория, город, цена, наличие телефона).
@@ -99,10 +113,12 @@
     *   Алерты: уведомления при 401/403/429 всплесках, падении скрапинга, превышении ошибок.
 *   Команды бота:
     *   /start — описание функционала и подписка.
-    *   /summary — сводка за период (24h по умолчанию).
-    *   /latest — последние N объявлений по фильтрам.
+    *   /add_query <текст> [фильтры] — создать запрос (опционально; может быть доступно только в веб).
+    *   /queries — список активных запросов с краткой статистикой.
+    *   /summary <search_id> — сводка за период по конкретному запросу (24h по умолчанию).
+    *   /latest <search_id> [N] — последние N объявлений по запросу.
     *   /filters — установить/показать фильтры доставки.
-    *   /status — состояние скрапер-процессов.
+    *   /status [search_id] — состояние скрапер-процессов.
 *   Конфигурация: bot_token, chat_id, parse_mode (Markdown/HTML), batching, фильтры по умолчанию.
 *   Безопасность: white-list пользователей/чатов, ограничение частоты команд.
 
